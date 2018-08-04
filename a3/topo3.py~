@@ -1,0 +1,177 @@
+import networkx as nx
+from mininet.topo import Topo
+from mininet.net import Mininet
+from mininet.node import CPULimitedHost
+from mininet.link import TCLink
+from mininet.node import Controller, RemoteController
+from mininet.cli import CLI
+from mininet.log import setLogLevel
+import re,random,time
+from networkx.utils import pairwise
+
+class CompleteGraphTopo(Topo):
+    def build(self):
+        graph=nx.DiGraph()        
+        edges=[('48', '57'), ('44', '45'), ('42', '53'), ('20', '19'), ('23', '16'), ('8', '51'), ('38', '18'), ('53', '52'), ('55', '50'), ('11', '10'), ('23', '24'), ('54', '52'), ('51', '36'), ('44', '39'), ('12', '52'), ('51', '53'), ('21', '22'), ('28', '51'), ('14', '50'), ('41', '53'), ('1', '0'), ('43', '51'), ('33', '37'), ('43', '40'), ('27', '44'), ('17', '31'), ('28', '36'), ('30', '48'), ('39', '38'), ('7', '6'), ('10', '36'), ('32', '33'), ('25', '17'), ('1', '53'), ('49', '2'), ('5', '4'), ('35', '34'), ('16', '50'), ('13', '52'), ('43', '11'), ('52', '50'), ('54', '53'), ('56', '57'), ('35', '50'), ('2', '56'), ('32', '50'), ('51', '52'), ('48', '49'), ('3', '53'), ('7', '53'), ('42', '43'), ('9', '51'), ('24', '14'), ('4', '51'), ('44', '50'), ('5', '10'), ('1', '6'), ('23', '21'), ('40', '41'), ('33', '50'), ('30', '31'), ('46', '51'), ('26', '50'), ('17', '50'), ('47', '51'), ('20', '46'), ('48', '56'), ('46', '45'), ('53', '50'), ('27', '14'), ('34', '52'), ('47', '53'), ('3', '52'), ('19', '51'), ('19', '18'), ('0', '3'), ('10', '51'), ('51', '50'), ('48', '52'), ('25', '27'), ('1', '15'), ('52', '55'), ('56', '52'), ('22', '51'), ('52', '37'), ('29', '51'), ('56', '55')]
+        for (x,y) in edges:
+            if (y,x) in edges:
+                edges.remove((y,x))
+        graph.add_edges_from(edges)
+        total_node=len(graph.nodes)
+        for node in range(total_node):
+            switch = self.addSwitch('s%s'%(node+1))
+            host = self.addHost('h%s'%(node+1),cpu=.5/total_node)
+            self.addLink( host, switch)
+        for (sw1, sw2) in edges:
+            sw1=int(sw1)+1
+            sw2=int(sw2)+1
+            self.addLink("s%d" % sw1, "s%d" % sw2)
+ 
+def ping(net,nodes,size='',count='',rate='',timeout=''):
+          """
+          """
+          if rate!='':
+           rate=' -i '+str(rate)
+          if timeout!='':
+             timeout=' -w '+str(timeout)
+          if size !='':
+             size='-s '+str(size)
+          if count !='':
+             count=' -c '+str(count)
+          src,dest=nodes
+          pingstats=src.cmd( 'ping %s %s' % (size+count+rate+timeout, dest.IP()) )
+          pingstats= pingstats.split('\r\n')
+          
+          try:
+            sent,received,loss,time=re.findall('\d+', pingstats[-3])
+          
+            min_,avg,max_,mdev=pingstats[-2].split('=')[1].strip().split(' ')[0].split('/') 
+          except:
+           return 1,0,64,64 # 64 is the ttl
+           #import pdb;pdb.set_trace() # 100% packet loss
+          return sent,received,min_,avg 
+def get_path_length(net,src,dst):
+    result=src.cmd('traceroute -n %s'%dst.IP())
+    try:
+      return int(result.split('\r\n')[-2].strip()[0])-1
+    except:
+       return 'Can not find path length'
+def getNum(string):
+          return float(re.findall('\d+.\d+',string)[0])       
+def doIperf(net,src,dst,port=5001,startLoad=10,time=5,datasize=1): # 10*96bytes per secodn
+          dst.cmd('sudo pkill iperf')          
+          dst.cmd(('iperf -s -p%s -u -D')%(port))
+          output=src.cmd(('iperf  -c %s  -p %s -u -t %d -b %sM')%(dst.IP(),port,time,datasize)) 
+          time=0.0
+          datasize_tx=0.0
+          bitrate=0.0          
+          try:
+             #import pdb;pdb.set_trace()
+             print 'iperf running for load '+str(datasize)
+             output=output.split('\r\n')[-4].split('-')[1].split('  ')
+             time=getNum(output[0])
+             datasize_tx=getNum(output[1])
+             bitrate=getNum(output[2])
+          except:
+                return [time,datasize_tx,bitrate]
+          return [time,datasize_tx,bitrate]
+def getavg(lst):
+   return sum(lst)/len(lst)
+   
+def enable_BFD(net):
+    """
+     Bidirectional Forwarding Detection(BFD) is a network protocol used to detect link failure between two forwarding elements. 
+    """
+    switches=net.switches
+    for switch in switches:
+        ofp_version(switch, ['OpenFlow13'])
+        intfs=switch.nameToIntf.keys()[1:]
+        for intf in intfs:
+            switch.cmd('ovs-vsctl set interface "%s" bfd:enable=true'%intf)
+            
+def ofp_version(switch, protocols):
+    """
+     sets openFlow version for each switch from mininet.
+    """
+    protocols_str = ','.join(protocols)
+    command = 'ovs-vsctl set Bridge %s protocols=%s' % (switch, protocols)
+    switch.cmd(command.split(' '))
+def sw_link_map(net):
+    """
+     constructs a links map where keys are switches and values are link object 
+     for links between switches
+    """
+    links_obj=net.links
+    link_objs_filtered={}
+    for obj in links_obj:
+        if obj.intf1.name.find('h')<1 or obj.intf2.name.find('h')<1: 
+           continue
+        intf1=int(obj.intf1.name.split('-')[0].replace('s',''))
+        intf2=int(obj.intf2.name.split('-')[0].replace('s',''))
+        link_objs_filtered[(intf1,intf2)]=obj
+    return link_objs_filtered
+def bi_direct_edges(edges):
+    bidirectEdges=[]
+    for item in edges:
+        bidirectEdges.append(item)
+        bidirectEdges.append((item[1],item[0])) 
+    return bidirectEdges  
+def runner():
+    "Create and run a custom topo with adjustable link parameters"
+    topo = CompleteGraphTopo( )
+    c = RemoteController('c', '127.0.0.1', 6633)
+    net = Mininet( topo=topo,
+                   controller=None,
+                              host=CPULimitedHost, link=TCLink ,waitConnected=True,autoSetMacs=True)
+
+    net.addController(c)           
+    net.start()
+    enable_BFD(net)# enable bfd
+    link_fail_dict=sw_link_map(net)
+    edges=link_fail_dict.keys() # keys of link_fail_dict has all the edges of the graph
+    edges=bi_direct_edges(edges) # make edges bi directional so that nx can find path
+    graph=nx.DiGraph()
+    graph.add_edges_from(edges) # construct graph from edges obtained from mininet net obj
+    random.seed(30) # set seed for random number
+    test_pair=[(1,6),(6,7),(6,9),(6,11),(16,17)] 
+    result={'hop':[],'delay':[],'throughput':[]}
+    time.sleep(1)
+    for pair in test_pair:
+        host1,host2=pair
+        src=net.getNodeByName('h'+str(host1+1))
+        dst=net.getNodeByName('h'+str(host2+1))
+        path=nx.shortest_path(graph,host1+1,host2+1) # compute shortest path from graph
+        links_between_pair=pairwise(path) # make links from path
+        randindex=random.randint(0,len(links_between_pair)-1) # find random index  to be used to get failed link
+        link_to_fail=links_between_pair[randindex] # get random link to be failed using random index
+        print 'Failing link between',link_to_fail
+        
+        if link_fail_dict.has_key(link_to_fail):
+           link_to_fail_obj=link_fail_dict[link_to_fail] # find the link obj to fail
+        elif link_fail_dict.has_key(link_to_fail[::-1]): # link might be with reverse key
+             link_to_fail_obj=link_fail_dict[link_to_fail[::-1]] # find the link obj to fail 
+             link_to_fail= link_to_fail[::-1]  
+        try:
+           print ping(net,[src,dst],64,2)# send some packets before calculation
+           net.delLink(link_to_fail_obj) # delete link to fail it
+        except:
+          import pdb;pdb.set_trace()
+        time.sleep(1)        
+        sent,received,min_,avg=ping(net,[src,dst],1024,5)
+        print 'Delay ',avg,' for ',pair
+        result['delay'].append(float(avg))
+        hop=get_path_length(net,src,dst)
+        print 'Hop ',hop,' for ',pair
+        result['hop'].append(float(hop))
+        time_perf,datasize_tx,bitrate=doIperf(net,src,dst)
+        print 'Throughput ',bitrate,' for ',pair
+        result['throughput'].append(float(bitrate))
+        link_fail_dict[link_to_fail]=net.addLink("s%d" %link_to_fail[0],"s%d" %link_to_fail[1])
+    print 'Average Number of Hop:', getavg(result['hop'])
+    print 'Average Delay: ', getavg(result['delay'])
+    print 'Throughput:',getavg(result['throughput'])
+    CLI(net)
+    net.stop()
+if __name__ == '__main__':
+    setLogLevel( 'info' )
+    runner()      
